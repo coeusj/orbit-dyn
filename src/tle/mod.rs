@@ -1,54 +1,48 @@
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 
-use crate::tle::errors::TleError;
-use crate::tle::models::Point;
-use crate::tle::models::SatTle;
-use crate::tle::models::TleElements;
-
 pub mod errors;
 pub mod models;
+mod constants;
 
-pub fn get_tle_str() -> Result<String, errors::TleError> {
-    let mut res = ureq::get("http://celestrak.com/NORAD/elements/gp.php")
-        .query("NAME", "GSAT0201 (GALILEO 5)")
+use crate::tle::errors::TleError;
+use crate::tle::models::Point;
+use crate::tle::models::TLE;
+use crate::tle::models::KeplerianElements;
+
+pub fn get_sat_tle(sat_name: String) -> Result<TLE, TleError> {
+    let mut res_json = ureq::get("http://celestrak.com/NORAD/elements/gp.php")
+        .query("NAME", sat_name)
         .query("FORMAT","json")
         .call()?;
-    let res_str = res.body_mut().read_to_string()?;
-    Ok(res_str)
+
+    let json_str = res_json.body_mut().read_to_string()?;
+    let tle_vec: Vec<TLE> = serde_json::from_str(&json_str)?;
+    Ok(tle_vec[0].clone())
 }
 
-pub fn parse_tle(tle_str: String) -> Result<Vec<SatTle>, TleError>{
-    let tle_deser: Vec<SatTle> = serde_json::from_str(&tle_str)?;
-    Ok(tle_deser)
-}
-
-pub fn analysis_anchor_datetime() -> Result<DateTime<Utc>, TleError> {
-    let now = Utc::now();
-    Ok(now)
-}
-
-pub fn propgate(tle: &models::SatTle, start: DateTime<Utc>, end: DateTime<Utc>, steps_sec: i64) -> Vec<Point> {
-    let elements = TleElements::new(tle);
+pub fn propgate(tle: models::TLE, start: DateTime<Utc>, end: DateTime<Utc>, steps_sec: i64) -> Vec<Point> {
+    let elements = KeplerianElements::new(tle);
 
     let mut points: Vec<Point> = Vec::new();
     let mut t = start;
+
     while t <= end {
         // 1) Mean anomaly at time t
         let dt_sec = (t - elements.epoch).as_seconds_f64();
-        let mut M = elements.m0_rad + elements.n_rad_s + dt_sec;
-        M = M % (2.0 * std::f64::consts::PI);
-        if M < 0.0 {
-            M += 2.0 + std::f64::consts::PI;
+        let mut mean_anomaly = elements.m0_rad + elements.n_rad_s + dt_sec;
+        mean_anomaly = mean_anomaly % (2.0 * std::f64::consts::PI);
+        if mean_anomaly < 0.0 {
+            mean_anomaly += 2.0 + std::f64::consts::PI;
         }
 
         // 2) Solve Kepler
-        let E = kepler_solve(M, elements.e);
-        let cosE = E.cos();
+        let eccentric_anomaly = kepler_solve(mean_anomaly, elements.e);
+        let eccentric_anomaly_cos = eccentric_anomaly.cos();
 
         // 3) Radius and true anomaly
-        let r_km = elements.a_km * (1.0 - elements.e * cosE);
-        let cos_v = (cosE - elements.e) / (1.0 - elements.e * cosE);
-        let sin_v = ((1.0 - elements.e * elements.e).sqrt() * E.sin()) / (1.0 - elements.e * cosE);
+        let r_km = elements.a_km * (1.0 - elements.e * eccentric_anomaly_cos);
+        let cos_v = (eccentric_anomaly_cos - elements.e) / (1.0 - elements.e * eccentric_anomaly_cos);
+        let sin_v = ((1.0 - elements.e * elements.e).sqrt() * eccentric_anomaly.sin()) / (1.0 - elements.e * eccentric_anomaly_cos);
         let v = sin_v.atan2(cos_v);
 
         // 4) Position in ECI
@@ -67,7 +61,7 @@ pub fn propgate(tle: &models::SatTle, start: DateTime<Utc>, end: DateTime<Utc>, 
         let r_eci: [f64; 3] = [x, y, z];
 
         // Speed magnitude from vis-viva (km/s)
-        let speed_km_s = (models::MU_EARTH_KM3_S2 * (2.0 / r_km - 1.0 / elements.a_km)).sqrt();
+        let speed_km_s = (constants::MU_EARTH_KM3_S2 * (2.0 / r_km - 1.0 / elements.a_km)).sqrt();
 
         // Inertial (ECI) spherical lat/lon (no Earth rotation)
         let geo_eci = ecef_to_geodetic(r_eci);
@@ -102,39 +96,36 @@ pub fn propgate(tle: &models::SatTle, start: DateTime<Utc>, end: DateTime<Utc>, 
     points
 }
 
-fn kepler_solve(M: f64, e: f64) -> f64 {
-    /*
-    * Solve Kepler's equation M = E - e sin(E) for E.
-    * Newton-Raphson method.
-    */
-    let max_iter = 20;
-    let tol  = 1e-8;
+/// Solves Kepler's equation: M = E - e * sin(E) for the Eccentric Anomaly (E).
+/// Uses the iterative Newton-Raphson numerical method.
+fn kepler_solve(mean_anomaly: f64, eccentricity: f64) -> f64 {
+    let max_iterations = 20;
+    let tolerance  = 1e-8;
 
-    let mut E = M;
-    for _ in 0..max_iter {
-        let f = E - e * E.sin() - M;
-        let fp = 1.0 - e * E.cos();
-        if fp == 0.0 {
+    let mut eccentric_anomaly = mean_anomaly;
+
+    for _ in 0..max_iterations {
+        let function_value = eccentric_anomaly - eccentricity * eccentric_anomaly.sin() - mean_anomaly;
+        let derivative_value = 1.0 - eccentricity * eccentric_anomaly.cos();
+        if derivative_value == 0.0 {
             break;
         }
 
-        let dE = f / fp;
-        let E_new = E - dE;
-        if dE < tol {
-            return E_new;
+        let correction_step = function_value / derivative_value;
+        let next_eccentric_anomaly = eccentric_anomaly - correction_step;
+        if correction_step.abs() < tolerance {
+            return next_eccentric_anomaly;
         }
 
-        E = E_new;
+        eccentric_anomaly = next_eccentric_anomaly;
     }
 
-    E
+    eccentric_anomaly
 }
 
+/// Very simple spherical conversion: ECEF [km] → (lat, lon, alt_km).
+/// Good enough for a workshop visualization.
 fn ecef_to_geodetic(r_ecef_km: [f64; 3]) -> [f64; 3] {
-    /*
-     * Very simple spherical conversion: ECEF [km] → (lat, lon, alt_km).
-     * Good enough for a workshop visualization.
-     */
     let x = r_ecef_km[0];
     let y = r_ecef_km[1];
     let z = r_ecef_km[2];
@@ -151,18 +142,15 @@ fn ecef_to_geodetic(r_ecef_km: [f64; 3]) -> [f64; 3] {
         lon = y.atan2(x);
     }
 
-    let alt_km = r - models::EARTH_RADIUS_KM;
+    let alt_km = r - constants::EARTH_RADIUS_KM;
     let lat_deg = lat.to_degrees();
     let lon_deg = lon.to_degrees();
     [lat_deg, lon_deg, alt_km]
 }
 
+/// Rotate position from ECI to ECEF using GMST.
+/// r_eci_km: [x, y, z] in km
 fn eci_to_ecef(r_eci_km: [f64; 3], dt: DateTime<Utc>) -> [f64; 3] {
-    /*
-     * Rotate position from ECI to ECEF using GMST.
-     * r_eci_km: [x, y, z] in km
-     */
-
     let theta = gmst_angle(&dt);
     let cos_t = theta.cos();
     let sin_t = theta.sin();
@@ -177,11 +165,10 @@ fn eci_to_ecef(r_eci_km: [f64; 3], dt: DateTime<Utc>) -> [f64; 3] {
     [x_ecef, y_ecef, z_ecef]
 }
 
-// Simple ECI → ECEF → geodetic helpers
+/// Simple ECI → ECEF → geodetic helpers
+/// Approximate Greenwich Mean Sidereal Time angle [rad].
+/// Good enough for visualization.
 fn gmst_angle(dt: &DateTime<Utc>) -> f64 {
-    // Approximate Greenwich Mean Sidereal Time angle [rad].
-    // Good enough for visualization.
-
     let year = dt.year() as f64;
     let month = dt.month() as f64;
     let day = dt.day() as f64;
@@ -198,17 +185,17 @@ fn gmst_angle(dt: &DateTime<Utc>) -> f64 {
         + (hour + minute / 60.0 + second / 3600.0) / 24.0;
 
     // Julian Centuries since the J2000.0 era
-    let t = (jd - 2451545.0) / 36525.0;
+    let t = (jd - constants::JD_J2000_EPOCH) /  constants::DAYS_PER_JULIAN_CENTURY;
 
     let gmst_sec_raw = 67310.54841
         + (876600.0 * 3600.0 + 8640184.812866) * t
         + 0.093104 * t.powi(2)
         - 6.2e-6 * t.powi(3);
 
-    let gmst_sec = gmst_sec_raw % 86400.0;
+    let gmst_sec = gmst_sec_raw % constants::SECONDS_PER_DAY;
 
     // Convert time seconds in radians
-    let gmst_rad = (gmst_sec / 240.0) * std::f64::consts::PI / 180.0;
+    let gmst_rad = (gmst_sec / constants::SECONDS_PER_DEGREE_ROTATION) * std::f64::consts::PI / 180.0;
 
     gmst_rad
 }

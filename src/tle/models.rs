@@ -3,13 +3,11 @@ use std::ops::Add;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-// Earth parameters (WGS-84)
-pub const MU_EARTH_KM3_S2: f64 = 398600.4418; // km^3/s^2
-pub const EARTH_RADIUS_KM: f64 = 6378.137; // km
+use crate::tle::constants;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "UPPERCASE")]
-pub struct SatTle {
+pub struct TLE {
     pub object_name: String,
     pub object_id: String,
     pub epoch: String,
@@ -30,8 +28,7 @@ pub struct SatTle {
 }
 
 #[derive(Debug)]
-pub struct TleElements {
-    pub name: String,
+pub struct KeplerianElements {
     pub epoch : DateTime<Utc>,
     pub a_km: f64,
     pub e: f64,
@@ -42,8 +39,8 @@ pub struct TleElements {
     pub n_rad_s: f64
 }
 
-impl TleElements {
-    pub fn new(tle: &SatTle) -> Self {
+impl KeplerianElements {
+    pub fn new(tle: TLE) -> Self {
         let epoch_iso = &tle.epoch.clone().add("Z");
         let epoch = DateTime::parse_from_rfc3339(epoch_iso).unwrap();
 
@@ -63,10 +60,9 @@ impl TleElements {
         let n_rad_s = 2.0 * std::f64::consts::PI * n_rev_day / 86400.0;
 
         // Kepler's 3rd law: n^2 a^3 = mu
-        let a = (MU_EARTH_KM3_S2 / n_rad_s * n_rad_s).powf(1.0 / 3.0);
+        let a = (constants::MU_EARTH_KM3_S2 / n_rad_s * n_rad_s).powf(1.0 / 3.0);
 
-        TleElements {
-            name: tle.object_name.clone(),
+        KeplerianElements {
             epoch: epoch.into(),
             a_km: a,
             e: *e_deg,

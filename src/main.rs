@@ -1,19 +1,17 @@
-use chrono::Duration;
-use tle::errors;
+mod tle;
 
-pub mod tle;
+use chrono::{Utc, Duration};
+use tle::errors;
 
 fn main() -> Result<(), errors::TleError> {
     const STEP_SECONDS: i64 = 5;
 
-    let tle_str = tle::get_tle_str()?;
-    let json = tle::parse_tle(tle_str)?;
-    let sat_tle = &json[0];
-    let start = tle::analysis_anchor_datetime()?;
+    let sat_name  = String::from("GSAT0201 (GALILEO 5)");
+    let sat_tle = tle::get_sat_tle(sat_name)?;
+    let start = Utc::now();
     let end = start + Duration::days(1);
     let points = tle::propgate(sat_tle, start, end, STEP_SECONDS);
 
-    println!("{} - samples ({} points)", sat_tle.object_name, points.len());
-
+    println!("GSAT0201 (GALILEO 5) - samples ({} points)", points.len());
     Ok(())
 }
