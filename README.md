@@ -1,4 +1,5 @@
-# Space Days by GNSS Academy - Orbit Dynamics Workshop Hands-on
+# Space Days (GNSS Academy)
+#### Orbit Dynamics Workshop
 
 Kepler propagator using TLE data. This is just a rust rewrite of the workshop's python project.
 
